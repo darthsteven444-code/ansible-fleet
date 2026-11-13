@@ -1,0 +1,119 @@
+# baseline hardening for every linux box. safe to run over and over.
+- name: baseline hardening
+  hosts: linux
+  become: true
+  vars:
+    ssh_user: itachixkurosaki
+  tasks:
+    - name: check a key is in place before password login gets turned off
+      ansible.builtin.stat:
+        path: "/home/{{ ssh_user }}/.ssh/authorized_keys"
+      register: ak
+
+    - name: refuse to continue without one, so this can never lock me out
+      ansible.builtin.assert:
+        that: ak.stat.exists and ak.stat.size > 0
+        fail_msg: "no authorized_keys for {{ ssh_user }} on {{ inventory_hostname }}, not touching ssh"
+
+    - name: packages
+      ansible.builtin.apt:
+        name: [fail2ban, unattended-upgrades]
+        state: present
+
+    - name: ssh hardening (00 so it loads before cloud-init's file, sshd keeps the first value it reads)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-fleet-hardening.conf
+        mode: "0644"
+        content: |
+          # managed by ansible-fleet, edits here get overwritten
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          MaxAuthTries 3
+          LoginGraceTime 30
+          X11Forwarding no
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+          MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256
+      notify: reload ssh
+
+    - name: remove the old hand made MAC fix, the file above replaces it
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/99-hardening.conf
+        state: absent
+      notify: reload ssh
+
+    - name: never reboot on its own (this is what hung k3s-1 for 23 hours)
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-no-auto-reboot
+        mode: "0644"
+        content: |
+          Unattended-Upgrade::Automatic-Reboot "false";
+
+    - name: security updates still install on their own, daily
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+
+    - name: fail2ban jail for ssh
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/sshd.local
+        mode: "0644"
+        content: |
+          [sshd]
+          enabled = true
+          backend = systemd
+          maxretry = 4
+          findtime = 10m
+          bantime = 1h
+          ignoreip = 127.0.0.1/8 ::1 100.64.0.0/10 192.168.20.30
+      notify: restart fail2ban
+
+    - name: fail2ban running
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+      ignore_errors: "{{ ansible_check_mode }}"
+
+    - name: kernel network hardening (ip_forward left alone, kubernetes needs it)
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/60-fleet-hardening.conf
+        reload: true
+      loop: "{{ settings | dict2items }}"
+      vars:
+        settings:
+          net.ipv4.conf.all.accept_redirects: "0"
+          net.ipv4.conf.default.accept_redirects: "0"
+          net.ipv6.conf.all.accept_redirects: "0"
+          net.ipv4.conf.all.send_redirects: "0"
+          net.ipv4.conf.all.accept_source_route: "0"
+          net.ipv4.tcp_syncookies: "1"
+          net.ipv4.icmp_echo_ignore_broadcasts: "1"
+          kernel.dmesg_restrict: "1"
+
+    - name: firewall on the control node (k3s nodes skip this, ufw fights kubernetes networking)
+      when: inventory_hostname in groups['control']
+      block:
+        - name: allow ssh
+          community.general.ufw:
+            rule: allow
+            name: OpenSSH
+        - name: firewall on
+          community.general.ufw:
+            state: enabled
+
+  handlers:
+    - name: reload ssh
+      ansible.builtin.shell: sshd -t && systemctl reload ssh
+
+    - name: restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted

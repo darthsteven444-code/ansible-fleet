@@ -1,0 +1,83 @@
+# patch everything. k3s nodes go one at a time so the site never goes down.
+- name: patch the control node
+  hosts: control
+  become: true
+  tasks:
+    - name: refresh package lists
+      ansible.builtin.shell: apt-get update -qq
+      changed_when: false
+
+    - name: upgrade
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: true
+
+    - name: reboot waiting?
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: rr
+
+    - name: not rebooting the box running ansible, just saying so
+      ansible.builtin.debug:
+        msg: "linux-lab wants a reboot. do it by hand when nothing is running on it."
+      when: rr.stat.exists
+
+- name: rolling patch of the k3s nodes
+  hosts: k3s
+  become: true
+  serial: 1
+  max_fail_percentage: 0
+  vars:
+    node: "{{ inventory_hostname }}"
+  pre_tasks:
+    - name: every node has to be Ready before I take one out
+      ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=60s
+      delegate_to: linux-lab
+      become: false
+      changed_when: false
+
+  tasks:
+    - name: patch this node
+      block:
+        - name: drain it (pods move to the other two nodes)
+          ansible.builtin.command: "kubectl drain {{ node }} --ignore-daemonsets --delete-emptydir-data --timeout=300s"
+          delegate_to: linux-lab
+          become: false
+
+        - name: refresh package lists
+          ansible.builtin.shell: apt-get update -qq
+          changed_when: false
+
+        - name: upgrade
+          ansible.builtin.apt:
+            upgrade: dist
+            autoremove: true
+
+        - name: reboot waiting?
+          ansible.builtin.stat:
+            path: /var/run/reboot-required
+          register: rr
+
+        - name: reboot if the upgrade asked for it
+          ansible.builtin.reboot:
+            reboot_timeout: 900
+          when: rr.stat.exists
+
+        - name: wait for kubernetes to call it Ready again
+          ansible.builtin.command: "kubectl wait --for=condition=Ready node/{{ node }} --timeout=300s"
+          delegate_to: linux-lab
+          become: false
+          changed_when: false
+
+      always:
+        - name: put it back in service, even if something above failed
+          ansible.builtin.command: "kubectl uncordon {{ node }}"
+          delegate_to: linux-lab
+          become: false
+
+    - name: let the site and the SIEM come all the way back before the next node
+      ansible.builtin.command: "kubectl wait --for=condition=Ready pod --all -n {{ item }} --field-selector=status.phase!=Succeeded --timeout=600s"
+      loop: [default, wazuh]
+      delegate_to: linux-lab
+      become: false
+      changed_when: false
