@@ -44,6 +44,11 @@
         state: absent
       notify: reload ssh
 
+    - name: validate the full ssh config every run (makes the dir socket activated sshd skips)
+      ansible.builtin.shell: install -d -m 0755 /run/sshd && sshd -t
+      changed_when: false
+      check_mode: false
+
     - name: never reboot on its own (this is what hung k3s-1 for 23 hours)
       ansible.builtin.copy:
         dest: /etc/apt/apt.conf.d/99-no-auto-reboot
@@ -111,7 +116,7 @@
 
   handlers:
     - name: reload ssh
-      ansible.builtin.shell: sshd -t && systemctl reload ssh
+      ansible.builtin.shell: install -d -m 0755 /run/sshd && sshd -t && systemctl try-reload-or-restart ssh
 
     - name: restart fail2ban
       ansible.builtin.service:
