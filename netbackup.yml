@@ -11,7 +11,7 @@
     ansible_network_cli_ssh_type: paramiko
     ansible_user: "{{ lookup('ansible.builtin.env', 'IOS_USER') }}"
     ansible_password: "{{ lookup('ansible.builtin.env', 'IOS_PASS') }}"
-    ansible_become: true
+    ansible_become: "{{ ios_become | default(true) }}"
     ansible_become_method: ansible.netcommon.enable
     ansible_become_password: "{{ lookup('ansible.builtin.env', 'IOS_ENABLE') }}"
     backup_dir: "{{ lookup('ansible.builtin.env', 'BACKUP_DIR') }}"
