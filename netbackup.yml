@@ -1,32 +1,24 @@
 ---
 # netbackup.yml: pulls the running config of every network device into a private git repo.
-# Cisco gear over SSH with enable, OPNsense over a key that is only allowed to read config.xml.
-# Inventory and credentials live outside this repo (see run-backup.sh), nothing secret is committed here.
+# Cisco gear through OpenSSH (ios-pull.sh, these IOS versions only speak the old SHA1 key exchange),
+# OPNsense over a key that is only allowed to read config.xml.
+# Inventory and credentials live outside this repo, nothing secret is committed here.
 - name: Cisco running configs
   hosts: ios
   gather_facts: false
-  connection: ansible.netcommon.network_cli
+  connection: local
   vars:
-    ansible_network_os: cisco.ios.ios
-    ansible_network_cli_ssh_type: paramiko
-    ansible_user: "{{ lookup('ansible.builtin.env', 'IOS_USER') }}"
-    ansible_password: "{{ lookup('ansible.builtin.env', 'IOS_PASS') }}"
-    ansible_become: "{{ ios_become | default(true) }}"
-    ansible_become_method: ansible.netcommon.enable
-    ansible_become_password: "{{ lookup('ansible.builtin.env', 'IOS_ENABLE') }}"
     backup_dir: "{{ lookup('ansible.builtin.env', 'BACKUP_DIR') }}"
   tasks:
-    - name: Read the running config
-      cisco.ios.ios_command:
-        commands: show running-config
-      register: running
-
-    - name: Save it, minus the lines that change on their own
-      ansible.builtin.copy:
-        content: "{{ running.stdout[0] | regex_replace('(?m)^(! Last configuration change|! NVRAM config last updated|ntp clock-period|Building configuration).*\\n?', '') }}\n"
-        dest: "{{ backup_dir }}/{{ inventory_hostname }}.cfg"
-        mode: "0600"
-      delegate_to: localhost
+    - name: Pull the running config
+      ansible.builtin.command:
+        argv:
+          - "{{ lookup('ansible.builtin.env', 'HOME') }}/.net-backup/ios-pull.sh"
+          - "{{ ansible_host }}"
+          - "{{ backup_dir }}/{{ inventory_hostname }}.cfg"
+      environment:
+        IOS_BECOME: "{{ 'yes' if (ios_become | default(true) | bool) else 'no' }}"
+      changed_when: false
 
 - name: OPNsense config.xml
   hosts: opnsense
